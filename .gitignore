@@ -1,3 +1,9 @@
 env/
 data/
 ShapeNetCore/
+metacentrum_example_script.sh
+.DS_Store
+Models/
+data_output/
+outputs/
+start_script.sh
