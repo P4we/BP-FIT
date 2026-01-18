@@ -3,6 +3,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+import open3d as o3d
 import trimesh
 from tqdm import tqdm
 from trimesh.base import Trimesh
@@ -11,54 +12,59 @@ from trimesh.base import Trimesh
 class ModelProcessor:
     def __init__(self, data_dir: str, output_dir: str):
         self.data_dir = Path(data_dir)
-        print("data", self.data_dir.resolve())
         self.output_dir = Path(output_dir)
-        print("output", self.output_dir.resolve())
         self.output_dir.mkdir(exist_ok=True)
 
     def process_all(self):
         for zip_path in tqdm(self.data_dir.glob("*.zip")):
-            print("zip path", zip_path.resolve())
             model_type = zip_path.stem
+
             with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
                 tmp_path = Path(tmp)
-                print("tmp path", tmp_path.resolve())
-                with zipfile.ZipFile(zip_path) as zip:
-                    zip.extractall(tmp_path)
+
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extractall(tmp_path)
 
                 for obj in tmp_path.rglob("*.obj"):
-                    print("processing obj: ", obj)
-
                     rel_path = obj.relative_to(tmp_path)
                     model_number = rel_path.parts[0]
                     output_dir = self.output_dir / model_type / model_number
                     output_dir.mkdir(parents=True, exist_ok=True)
 
                     mesh = trimesh.load_mesh(file_obj=obj)
-                    print(mesh)
                     normalized_mesh = self.normalize_mesh(mesh)
-                    print(normalized_mesh)
+
                     points = self.get_points_from_mesh(normalized_mesh)
-                    print(points)
                     noise_points1 = self.add_noise_to_points(points, 0.0005)
                     noise_points2 = self.add_noise_to_points(points, 0.0015)
                     noise_points3 = self.add_noise_to_points(points, 0.005)
                     points_with_hole = self.remove_points_hole(points)
-                    print(points_with_hole)
-                    self.save_points(points, output_dir / "classic.npy")
-                    self.save_points(noise_points1, output_dir / "noise1.npy")
-                    self.save_points(noise_points2, output_dir / "noise2.npy")
-                    self.save_points(noise_points3, output_dir / "noise3.npy")
-                    self.save_points(points_with_hole, output_dir / "hole.npy")
+
+                    # self.visualize(points_with_hole)
+
+                    self.save_points(
+                        (
+                            points,
+                            noise_points1,
+                            noise_points2,
+                            noise_points3,
+                            points_with_hole,
+                        ),
+                        output_dir / "arrays.npz",
+                    )
                     break  # Process only one obj file
             break  # Process only one zip file for testing purpouses
 
     def normalize_mesh(self, mesh: Trimesh) -> Trimesh:
-        mesh.apply_translation(  # Center the mesh around 0,0,0
-            -mesh.bounding_box.centroid
-        )
-        scale = 1.0 / mesh.scale  # Scaling to a box (-1, 1)
-        mesh.apply_scale(scale)
+        mesh = mesh.copy()
+
+        # Center around 0,0,0
+        mesh.apply_translation(-mesh.bounding_box.centroid)
+
+        # Scale to unit sphere
+        max_norm = np.linalg.norm(mesh.vertices, axis=1).max()
+        mesh.apply_scale(1.0 / max_norm)
+
         return mesh
 
     def get_points_from_mesh(self, mesh: Trimesh, num_of_points=100_000) -> np.ndarray:
@@ -69,17 +75,42 @@ class ModelProcessor:
         return points + np.random.normal(scale=noise, size=points.shape)
 
     def remove_points_hole(self, points: np.ndarray) -> np.ndarray:
-        pos = np.random.uniform(-1, 1, size=3)
-        radius = 0.05
-        mask = np.linalg.norm(points - pos, axis=1) > radius
+        mask = np.ones(len(points), dtype=bool)
+
+        # Random points from pc
+        num_holes = 3
+        hole_indices = np.random.choice(len(points), size=num_holes, replace=False)
+        hole_centers = points[hole_indices]
+
+        # Make a hole with radius 0.1 at the random points
+        radius = 0.1
+        for pos in hole_centers:
+            mask &= np.linalg.norm(points - pos, axis=1) > radius
+
         return points[mask]
 
-    def save_points(self, points: np.ndarray, file_path: Path | str):
+    def save_points(self, points, file_path: Path | str):
         output_path = Path(file_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(output_path, points)
+        np.savez_compressed(
+            output_path,
+            classic=points[0],
+            noise1=points[1],
+            noise2=points[2],
+            noise3=points[3],
+            hole=points[4],
+        )
+
+    def visualize(self, points):
+        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=1.0)
+        sphere = o3d.geometry.LineSet.create_from_triangle_mesh(sphere)
+        sphere.colors = o3d.utility.Vector3dVector([[1, 0, 0]] * len(sphere.lines))
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+
+        o3d.visualization.draw_geometries([pcd, sphere])
 
 
 if __name__ == "__main__":
-    model_processor = ModelProcessor("Models", "data_output")
+    model_processor = ModelProcessor("Models", "PointClouds")
     model_processor.process_all()
